@@ -444,4 +444,9 @@ extern "C" void OnModLoad()
     const char* names[] = { "AND_TouchEvent", "_Z14AND_TouchEventiiii", "_Z14AND_TouchEventiiiii" };
     for (const char* n : names)
     {
-        void* p = (void*)aml->GetSym(hGTAS
+        void* p = (void*)aml->GetSym(hGTASA, n);
+            if (p) { aml->Hook(p, (void*)TouchEvent_hook, (void**)&TouchEvent_orig); g_touchHooked = (TouchEvent_orig != nullptr); g_touchSym = n; break; }
+    }
+    LOGI("siap: egl=%d touch=%d AntiFlip=%d", g_eglHooked, g_touchHooked, g_enabled ? 1 : 0);
+    WriteLog();
+}
