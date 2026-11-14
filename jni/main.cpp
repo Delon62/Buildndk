@@ -1,5 +1,5 @@
 // ============================================================================
-//  Anti Kebalik v2.0 - mod AML (32-bit / armeabi-v7a) untuk GTA San Andreas 2.00
+//  Anti Kebalik v2.1 - mod AML (32-bit / armeabi-v7a) untuk GTA San Andreas 2.00
 //
 //  Fungsi  : jika AKTIF, kendaraan apa pun yang dipakai CJ dibalikkan otomatis
 //            saat sudah BERHENTI dalam posisi terbalik di permukaan.
@@ -13,6 +13,7 @@
 #include <mod/logger.h>
 #include <android/log.h>
 #include <EGL/egl.h>
+#include <GLES2/gl2.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -27,7 +28,7 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMOD(net.antikebalik.cj, AntiKebalik, 2.0.0, Custom)
+MYMOD(net.antikebalik.cj, AntiKebalik, 2.1.0, Custom)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AntiKebalik", __VA_ARGS__)
@@ -79,6 +80,10 @@ static bool   g_eglHooked = false, g_touchHooked = false;
 static unsigned g_touchCount[8] = {0};
 static int    g_lastTouchType = -1, g_lastTouchX = 0, g_lastTouchY = 0;
 static unsigned g_renderFrames = 0;
+static EGLContext g_ctx = EGL_NO_CONTEXT;
+static int      g_winMatch = 0, g_winMis = 0;
+static unsigned g_ctxSwitches = 0, g_skipCtx = 0, g_glErr = 0;
+static bool     g_needLog = false;
 
 // ------------------------------------------------------------------- config
 static const char* FirstExistingIni()
@@ -121,6 +126,7 @@ static void SaveConfig()
 // -------------------------------------------------------------------- log
 static FILE* OpenLogSomewhere()
 {
+    if (g_wroteTo[0] && strcmp(g_wroteTo, "-") != 0) { FILE* f0 = fopen(g_wroteTo, "w"); if (f0) return f0; }
     char c[10][512]; int n = 0;
     auto add = [&](const char* s) { if (s && s[0] && n < 10) { snprintf(c[n], 512, "%s", s); ++n; } };
     if (g_usedIni[0] && strcmp(g_usedIni, "-") != 0)
@@ -136,13 +142,14 @@ static FILE* OpenLogSomewhere()
 static void WriteLog()
 {
     FILE* f = OpenLogSomewhere(); if (!f) return;
-    fprintf(f, "AntiKebalik v2.0 status\n");
+    fprintf(f, "AntiKebalik v2.1 status\n");
     fprintf(f, "constructor_ran=%d self=%s\n", g_ctorRan ? 1 : 0, g_selfPath);
     fprintf(f, "stage=%d (1=OnModLoad,2=simbol ok,3=hook terpasang,4=polling cadangan)\n", g_stage);
     fprintf(f, "egl_hook=%d touch_hook=%d touch_sym=%s render_frames=%u\n", g_eglHooked, g_touchHooked, g_touchSym, g_renderFrames);
     fprintf(f, "touch_types: t0=%u t1=%u t2=%u t3=%u t4=%u t5=%u t6=%u t7+=%u last=(%d,%d,%d)\n",
             g_touchCount[0], g_touchCount[1], g_touchCount[2], g_touchCount[3], g_touchCount[4], g_touchCount[5], g_touchCount[6], g_touchCount[7],
             g_lastTouchType, g_lastTouchX, g_lastTouchY);
+    fprintf(f, "gl_ctx=%p ctx_switches=%u skipped_frames=%u last_gl_error=0x%x\n", g_ctx, g_ctxSwitches, g_skipCtx, g_glErr);
     fprintf(f, "hook_frames=%u ini_found=%d path=%s aml_config=%s\n", g_frames, g_iniFound ? 1 : 0, g_usedIni, g_cfgPathAML);
     fprintf(f, "AntiFlip_enabled=%d panel_owns=%d save_ok=%d\n", g_enabled ? 1 : 0, g_panelOwns ? 1 : 0, g_saveOk ? 1 : 0);
     fprintf(f, "vehicle_ptr=%p at.z=%.3f moved=%.4f still=%d max_still=%d min_at.z=%.3f upside_seen=%u flips=%u\n",
@@ -188,8 +195,6 @@ static void CGame_Process_hook()
 {
     CGame_Process_orig();
     ++g_frames;
-    time_t now = time(nullptr);
-    if (now != g_lastCfgCheck) { g_lastCfgCheck = now; LoadConfig(); WriteLog(); }
     if (g_enabled) AntiFlipTick(); else { g_lastVeh = nullptr; g_stillTicks = 0; }
 }
 
@@ -293,7 +298,7 @@ static void DrawPanel(int w, int h)
     }
     if (g_enabled) ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 1.0f), "AKTIF");
     else           ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "MATI (normal)");
-    ImGui::TextDisabled("Mod termuat - v2.0");
+    ImGui::TextDisabled("Mod termuat - v2.1");
     if (ImGui::CollapsingHeader("Info debug"))
     {
         ImGui::Text("stage=%d  egl=%d  touch=%d", g_stage, g_eglHooked, g_touchHooked);
@@ -301,6 +306,8 @@ static void DrawPanel(int w, int h)
         ImGui::Text("kendaraan: %s", g_dbgVeh ? "ya" : "tidak");
         ImGui::Text("at.z=%.2f diam=%d flip=%u", g_dbgAtZ, g_stillTicks, g_flips);
         ImGui::Text("simpan ini: %s", g_saveOk ? "ok" : "gagal");
+        ImGui::Text("ctx ganti=%u lewat=%u glerr=0x%x", g_ctxSwitches, g_skipCtx, g_glErr);
+        if (ImGui::Button("Simpan log")) WriteLog();
     }
     if (ImGui::Button("Tutup")) g_panelOpen = false;
     ImGui::End();
@@ -309,7 +316,23 @@ static void DrawPanel(int w, int h)
 
 static void RenderPanel(EGLDisplay dpy, EGLSurface surf)
 {
-    if (eglGetCurrentContext() == EGL_NO_CONTEXT) return;
+    EGLContext cur = eglGetCurrentContext();
+    if (cur == EGL_NO_CONTEXT) return;
+    if (g_ctx == EGL_NO_CONTEXT) g_ctx = cur;
+
+    // Jika game memakai lebih dari satu konteks GL, gambar hanya di konteks yang dominan.
+    if (cur == g_ctx) ++g_winMatch; else { ++g_winMis; ++g_skipCtx; }
+    if (g_winMatch + g_winMis >= 120)
+    {
+        if (g_winMis > g_winMatch)                // konteks utama berpindah -> ikuti
+        {
+            if (g_imInit) ImGui_ImplOpenGL3_DestroyDeviceObjects();
+            g_ctx = cur; ++g_ctxSwitches; g_needLog = true;
+        }
+        g_winMatch = g_winMis = 0;
+    }
+    if (cur != g_ctx) return;
+
     EGLint w = 0, h = 0;
     eglQuerySurface(dpy, surf, EGL_WIDTH, &w); eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
     if (w <= 0 || h <= 0) return;
@@ -320,14 +343,35 @@ static void RenderPanel(EGLDisplay dpy, EGLSurface surf)
     double t = NowSec(); float dt = (float)(t - g_lastFrameT); g_lastFrameT = t;
     if (dt < 0.0001f || dt > 0.25f) dt = 1.0f / 60.0f;
     io.DeltaTime = dt;
-
     PumpTouches(io);
+
+    // --- simpan state GL milik game, lalu pakai state bersih untuk ImGui
+    GLint prevFbo = 0, prevArr = 0, prevElem = 0, attrEn[8];
+    GLboolean cm[4] = {1, 1, 1, 1};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevArr);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &prevElem);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    for (int i = 0; i < 8; ++i) { attrEn[i] = 0; glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &attrEn[i]); }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     DrawPanel(w, h);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    // --- kembalikan state GL game (atribut vertex yang dinyalakan ImGui harus dimatikan lagi)
+    for (int i = 0; i < 8; ++i) { if (attrEn[i]) glEnableVertexAttribArray(i); else glDisableVertexAttribArray(i); }
+    glColorMask(cm[0], cm[1], cm[2], cm[3]);
+    glBindBuffer(GL_ARRAY_BUFFER, prevArr);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prevElem);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
+    GLenum e = glGetError(); if (e != GL_NO_ERROR) g_glErr = e;
     ++g_renderFrames;
+
+    if (g_needLog) { g_needLog = false; WriteLog(); }   // jarang: hanya saat konteks berganti
 }
 
 static EGLBoolean eglSwapBuffers_hook(EGLDisplay dpy, EGLSurface surf)
@@ -353,7 +397,7 @@ static void* PollThread(void*)
     {
         usleep(16000); ++g_frames;
         time_t now = time(nullptr);
-        if (now != g_lastCfgCheck) { g_lastCfgCheck = now; LoadConfig(); WriteLog(); }
+        if (now - g_lastCfgCheck >= 10) { g_lastCfgCheck = now; LoadConfig(); }
         if (g_enabled) AntiFlipTick(); else { g_lastVeh = nullptr; g_stillTicks = 0; }
     }
     return nullptr;
@@ -400,9 +444,4 @@ extern "C" void OnModLoad()
     const char* names[] = { "AND_TouchEvent", "_Z14AND_TouchEventiiii", "_Z14AND_TouchEventiiiii" };
     for (const char* n : names)
     {
-        void* p = (void*)aml->GetSym(hGTASA, n);
-        if (p) { aml->Hook(p, (void*)TouchEvent_hook, (void**)&TouchEvent_orig); g_touchHooked = (TouchEvent_orig != nullptr); g_touchSym = n; break; }
-    }
-    LOGI("siap: egl=%d touch=%d AntiFlip=%d", g_eglHooked, g_touchHooked, g_enabled ? 1 : 0);
-    WriteLog();
-}
+        void* p = (void*)aml->GetSym(hGTAS
