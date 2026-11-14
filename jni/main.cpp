@@ -15,6 +15,9 @@
 #include <cstdlib>
 #include <cmath>
 #include <ctime>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <unistd.h>
 
 MYMOD(net.antikebalik.cj, AntiKebalik, 1.0.0, Custom)
 NEEDGAME(com.rockstargames.gtasa)
@@ -57,6 +60,10 @@ static Mtx*   g_dbgMtx = nullptr;
 static float  g_dbgAtZ = 0, g_dbgMoved = 0, g_dbgPlacementZ = 0, g_dbgMatrixZ = 0;
 static const char* LOG_PATH_1 = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/configs/AntiKebalik.log";
 static char g_logPath[512];
+static char g_iniPath2[512] = "";   // berbasis lokasi libAntiKebalik.so: <mods>/../configs/
+static char g_logPath2[512] = "";
+static char g_selfPath[512] = "-";
+static bool g_ctorRan = false;
 static void* g_symProcess = nullptr;
 static void* g_symFindVeh = nullptr;
 static void* g_hGTASAdbg  = nullptr;
@@ -66,13 +73,15 @@ static const char* LOG_PATH_3 = "/sdcard/AntiKebalik.log";
 
 static void WriteLog()
 {
-    FILE* f = fopen(g_logPath, "w");
+    FILE* f = g_logPath2[0] ? fopen(g_logPath2, "w") : nullptr;
+    if (!f) f = fopen(g_logPath, "w");
     if (!f) f = fopen(LOG_PATH_1, "w");
     if (!f) f = fopen(LOG_PATH_2, "w");
     if (!f) f = fopen(LOG_PATH_3, "w");
     if (!f) return;
     fprintf(f, "AntiKebalik v1.2 status\n");
-    fprintf(f, "stage=%d (1=OnModLoad jalan, 2=simbol ketemu, 3=hook terpasang)\n", g_stage);
+    fprintf(f, "constructor_ran=%d self=%s\n", g_ctorRan ? 1 : 0, g_selfPath);
+    fprintf(f, "stage=%d (0=OnModLoad TIDAK dipanggil AML, 1=OnModLoad jalan, 2=simbol ketemu, 3=hook terpasang, 4=mode cadangan polling)\n", g_stage);
     fprintf(f, "libGTASA_handle=%p CGame::Process=%p FindPlayerVehicle=%p\n", g_hGTASAdbg, g_symProcess, g_symFindVeh);
     fprintf(f, "hook_frames=%u (naik terus = hook jalan)\n", g_frames);
     fprintf(f, "ini_found=%d path=%s\n", g_iniFound ? 1 : 0, g_usedIni);
@@ -88,8 +97,9 @@ static void WriteLog()
 // ------------------------------------------------------------------- config
 static void LoadConfig()
 {
-    const char* used = g_iniPath;
-    FILE* f = fopen(g_iniPath, "r");
+    const char* used = g_iniPath2;
+    FILE* f = g_iniPath2[0] ? fopen(g_iniPath2, "r") : nullptr;
+    if (!f) { used = g_iniPath; f = fopen(g_iniPath, "r"); }
     if (!f) { f = fopen(INI_PATH_1, "r"); used = INI_PATH_1; }
     g_iniFound = (f != nullptr);
     if (!f) return;                       // file tidak ada -> pertahankan nilai terakhir
@@ -193,4 +203,53 @@ extern "C" void OnModLoad()
     g_stage = 3;
     __android_log_print(ANDROID_LOG_INFO, "AntiKebalik", "siap (AntiFlip=%d)", g_enabled ? 1 : 0);
     WriteLog();
+}
+
+
+// ============================================================================
+//  MODE CADANGAN (tanpa API AML)
+//  Konstruktor berjalan begitu AML melakukan dlopen pada file ini, walau
+//  antarmuka AML tidak cocok. Jika OnModLoad tidak pernah memasang hook,
+//  thread ini memanggil logika yang sama ~60x/detik lewat polling.
+// ============================================================================
+static void* PollThread(void*)
+{
+    sleep(15);                                   // beri waktu AML memanggil OnModLoad
+    if (g_stage == 3) return nullptr;            // hook normal sudah jalan -> tidak perlu
+
+    void* h = nullptr;
+    for (int i = 0; i < 600 && !h; ++i) { h = dlopen("libGTASA.so", RTLD_NOW | RTLD_NOLOAD); if (!h) sleep(1); }
+    if (!h) { WriteLog(); return nullptr; }
+    g_hGTASAdbg = h;
+    FindPlayerVehicle = (void*(*)(int,bool))dlsym(h, "_Z17FindPlayerVehicleib");
+    g_symFindVeh = (void*)FindPlayerVehicle;
+    if (!FindPlayerVehicle) { WriteLog(); return nullptr; }
+
+    g_stage = 4;
+    for (;;)
+    {
+        usleep(16000);
+        ++g_frames;
+        time_t now = time(nullptr);
+        if (now != g_lastCfgCheck) { g_lastCfgCheck = now; LoadConfig(); WriteLog(); }
+        if (g_enabled) AntiFlipTick(); else { g_lastVeh = nullptr; g_stillTicks = 0; }
+    }
+    return nullptr;
+}
+
+__attribute__((constructor)) static void AntiKebalikCtor()
+{
+    g_ctorRan = true;
+    Dl_info di;
+    if (dladdr((void*)&AntiKebalikCtor, &di) && di.dli_fname)
+    {
+        snprintf(g_selfPath, sizeof g_selfPath, "%s", di.dli_fname);
+        char dir[512]; snprintf(dir, sizeof dir, "%s", di.dli_fname);
+        char* sl = strrchr(dir, '/'); if (sl) *sl = 0;          // folder mods
+        snprintf(g_iniPath2, sizeof g_iniPath2, "%s/../configs/AntiKebalik.ini", dir);
+        snprintf(g_logPath2, sizeof g_logPath2, "%s/../configs/AntiKebalik.log", dir);
+    }
+    LoadConfig();
+    WriteLog();                                  // bukti file ini dimuat (stage=0 jika OnModLoad belum jalan)
+    pthread_t t; pthread_create(&t, nullptr, PollThread, nullptr); pthread_detach(t);
 }
