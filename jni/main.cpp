@@ -9,6 +9,7 @@
 // ============================================================================
 #include <mod/amlmod.h>
 #include <mod/logger.h>
+#include <android/log.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -126,8 +127,7 @@ extern "C" void OnModLoad()
     hGTASA = aml->GetLibHandle("libGTASA.so");
     FindPlayerVehicle = (void*(*)(int,bool))aml->GetSym(hGTASA, "_Z17FindPlayerVehicleib");
      void* pProcess    = (void*)aml->GetSym(hGTASA, "_ZN5CGame7ProcessEv");
- 
-    if (!FindPlayerVehicle || !pProcess) { logger->Error("AntiKebalik: simbol game tidak ditemukan"); return; }
-    aml->Hook(pProcess, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
-    logger->Info("AntiKebalik: siap (AntiFlip=%d)", g_enabled ? 1 : 0);
+   
+ if (!FindPlayerVehicle || !pProcess) { __android_log_print(ANDROID_LOG_ERROR, "AntiKebalik", "simbol game tidak ditemukan"); return; }   aml->Hook(pProcess, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
+    __android_log_print(ANDROID_LOG_INFO, "AntiKebalik", "siap (AntiFlip=%d)", g_enabled ? 1 : 0);
 }
