@@ -13,7 +13,7 @@ jobs:
           test -n "$MK" || { echo "Android.mk tidak ada di repo"; ls -R; exit 1; }
           echo "PROJ=$(dirname $(dirname $MK))" >> $GITHUB_ENV
 
-                - name: Cek isi folder
+      - name: Cek isi folder
         run: |
           echo "PROJ=$PROJ"
           ls -la "$PROJ" "$PROJ/jni"
