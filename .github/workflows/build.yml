@@ -5,13 +5,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cari folder proyek
+        run: |
+          MK=$(find . -path ./aml_src -prune -o -name Android.mk -print | head -n 1)
+          echo "Android.mk ditemukan: $MK"
+          test -n "$MK" || { echo "Android.mk tidak ada di repo"; ls -R; exit 1; }
+          echo "PROJ=$(dirname $(dirname $MK))" >> $GITHUB_ENV
+
       - name: Ambil header AML
         run: |
           git clone --depth 1 https://github.com/RusJJ/AndroidModLoader aml_src
-          mkdir -p aml_headers && cp -r aml_src/mod aml_headers/mod
+          mkdir -p "$PROJ/aml_headers"
+          cp -r aml_src/mod "$PROJ/aml_headers/mod"
+          ls "$PROJ/aml_headers/mod"
+
       - name: Build
-        run: $ANDROID_NDK_LATEST_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=jni/Android.mk NDK_APPLICATION_MK=jni/Application.mk
+        run: |
+          cd "$PROJ"
+          $ANDROID_NDK_LATEST_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=jni/Android.mk NDK_APPLICATION_MK=jni/Application.mk
+
       - uses: actions/upload-artifact@v4
         with:
           name: libAntiKebalik
-          path: libs/armeabi-v7a/libAntiKebalik.so
+          path: ${{ env.PROJ }}/libs/armeabi-v7a/libAntiKebalik.so
