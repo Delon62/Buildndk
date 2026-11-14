@@ -15,10 +15,10 @@
 #include <cstdlib>
 #include <cmath>
 #include <ctime>
- 
+
 MYMOD(net.antikebalik.cj, AntiKebalik, 1.0.0, Custom)
 NEEDGAME(com.rockstargames.gtasa)
- 
+
 // ---------------------------------------------------------------- tata letak
 // Offset berikut stabil untuk GTA SA Android 32-bit (CPlaceable):
 //   +0x14 = pointer CMatrix
@@ -31,28 +31,69 @@ struct Mtx {
     Vec3 at;    unsigned int f2;
     Vec3 pos;   unsigned int f3;
 };
- 
+
 // --------------------------------------------------------------------- state
 static void* hGTASA = nullptr;
 static void* (*FindPlayerVehicle)(int, bool) = nullptr;
 static void  (*CGame_Process_orig)() = nullptr;
- 
+
 static bool  g_enabled   = false;
 static const char* INI_PATH_1 = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/configs/AntiKebalik.ini";
 static char  g_iniPath[512];
 static time_t g_lastCfgCheck = 0;
- 
+
 static void*  g_lastVeh   = nullptr;
 static Vec3   g_lastPos   = {0, 0, 0};
 static int    g_stillTicks = 0;      // jumlah frame berturut-turut kendaraan diam
 static int    g_cooldown   = 0;
- 
+
+// --- diagnostik (ditulis ke AntiKebalik.log tiap ~1 detik) ---
+static unsigned g_frames = 0, g_flips = 0;
+static bool   g_iniFound = false;
+static char   g_usedIni[512] = "-";
+static char   g_cfgPathAML[512] = "-";
+static void*  g_dbgVeh = nullptr;
+static Mtx*   g_dbgMtx = nullptr;
+static float  g_dbgAtZ = 0, g_dbgMoved = 0, g_dbgPlacementZ = 0, g_dbgMatrixZ = 0;
+static const char* LOG_PATH_1 = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/configs/AntiKebalik.log";
+static char g_logPath[512];
+static void* g_symProcess = nullptr;
+static void* g_symFindVeh = nullptr;
+static void* g_hGTASAdbg  = nullptr;
+static int   g_stage = 0;   // 1=OnModLoad masuk, 2=simbol ok, 3=hook terpasang
+static const char* LOG_PATH_2 = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/AntiKebalik.log";
+static const char* LOG_PATH_3 = "/sdcard/AntiKebalik.log";
+
+static void WriteLog()
+{
+    FILE* f = fopen(g_logPath, "w");
+    if (!f) f = fopen(LOG_PATH_1, "w");
+    if (!f) f = fopen(LOG_PATH_2, "w");
+    if (!f) f = fopen(LOG_PATH_3, "w");
+    if (!f) return;
+    fprintf(f, "AntiKebalik v1.2 status\n");
+    fprintf(f, "stage=%d (1=OnModLoad jalan, 2=simbol ketemu, 3=hook terpasang)\n", g_stage);
+    fprintf(f, "libGTASA_handle=%p CGame::Process=%p FindPlayerVehicle=%p\n", g_hGTASAdbg, g_symProcess, g_symFindVeh);
+    fprintf(f, "hook_frames=%u (naik terus = hook jalan)\n", g_frames);
+    fprintf(f, "ini_found=%d path=%s\n", g_iniFound ? 1 : 0, g_usedIni);
+    fprintf(f, "aml_config_path=%s\n", g_cfgPathAML);
+    fprintf(f, "AntiFlip_enabled=%d\n", g_enabled ? 1 : 0);
+    fprintf(f, "vehicle_ptr=%p matrix_ptr=%p\n", g_dbgVeh, (void*)g_dbgMtx);
+    fprintf(f, "at.z=%.3f (negatif = terbalik)  moved/frame=%.4f  still_ticks=%d  cooldown=%d\n",
+            g_dbgAtZ, g_dbgMoved, g_stillTicks, g_cooldown);
+    fprintf(f, "matrix.pos.z=%.3f placement.pos.z=%.3f (harus hampir sama)\n", g_dbgMatrixZ, g_dbgPlacementZ);
+    fprintf(f, "total_flips=%u\n", g_flips);
+    fclose(f);
+}
 // ------------------------------------------------------------------- config
 static void LoadConfig()
 {
+    const char* used = g_iniPath;
     FILE* f = fopen(g_iniPath, "r");
-    if (!f) f = fopen(INI_PATH_1, "r");
+    if (!f) { f = fopen(INI_PATH_1, "r"); used = INI_PATH_1; }
+    g_iniFound = (f != nullptr);
     if (!f) return;                       // file tidak ada -> pertahankan nilai terakhir
+    snprintf(g_usedIni, sizeof g_usedIni, "%s", used);
     char line[256]; bool inVeh = false; bool val = false;
     while (fgets(line, sizeof line, f))
     {
@@ -67,67 +108,89 @@ static void LoadConfig()
     fclose(f);
     g_enabled = val;
 }
- 
+
 // --------------------------------------------------------------- logika inti
 static void AntiFlipTick()
 {
     void* veh = FindPlayerVehicle ? FindPlayerVehicle(-1, false) : nullptr;
+    g_dbgVeh = veh; g_dbgMtx = nullptr;
     if (!veh) { g_lastVeh = nullptr; g_stillTicks = 0; return; }
- 
+
     Mtx* m = *(Mtx**)((char*)veh + OFF_MATRIX);
+    g_dbgMtx = m;
+    g_dbgPlacementZ = *(float*)((char*)veh + 0x4 + 8);   // CSimpleTransform.pos.z
     if (!m) return;
- 
+    g_dbgMatrixZ = m->pos.z; g_dbgAtZ = m->at.z;
+
     if (veh != g_lastVeh) { g_lastVeh = veh; g_lastPos = m->pos; g_stillTicks = 0; return; }
- 
+
     // Seberapa jauh kendaraan bergerak sejak frame lalu
     float dx = m->pos.x - g_lastPos.x, dy = m->pos.y - g_lastPos.y, dz = m->pos.z - g_lastPos.z;
     float moved = sqrtf(dx*dx + dy*dy + dz*dz);
     g_lastPos = m->pos;
- 
+    g_dbgMoved = moved;
+
     if (g_cooldown > 0) { --g_cooldown; return; }
- 
+
     // 'at' = sumbu atas kendaraan. at.z < -0.3 => terbalik / hampir terbalik
     bool upsideDown = (m->at.z < -0.3f);
-    bool still      = (moved < 0.02f);    // kira-kira < 1.2 m/s pada 60 fps
- 
+    bool still      = (moved < 0.06f);    // toleransi getaran fisika
+
     if (upsideDown && still) ++g_stillTicks; else g_stillTicks = 0;
- 
+
     // Harus diam >= ~0.5 detik (30 frame) agar yakin sudah bersandar di permukaan,
     // bukan sedang melayang/berputar di puncak lompatan.
-    if (g_stillTicks >= 30)
+    if (g_stillTicks >= 20)
     {
         // Putar 180 derajat pada sumbu depan (top): heading tetap, roda ke bawah.
         m->right.x = -m->right.x; m->right.y = -m->right.y; m->right.z = -m->right.z;
         m->at.x    = -m->at.x;    m->at.y    = -m->at.y;    m->at.z    = -m->at.z;
         m->pos.z  += 0.8f;            // angkat sedikit agar tidak menembus tanah
         g_lastPos  = m->pos;
-        g_stillTicks = 0;
+        g_stillTicks = 0; ++g_flips;
         g_cooldown   = 90;            // jeda ~1,5 detik
     }
 }
- 
+
 // --------------------------------------------------------------- hook frame
 static void CGame_Process_hook()
 {
     CGame_Process_orig();             // proses game normal dulu
- 
+    ++g_frames;
+
     time_t now = time(nullptr);
-    if (now != g_lastCfgCheck) { g_lastCfgCheck = now; LoadConfig(); }
- 
+    if (now != g_lastCfgCheck) { g_lastCfgCheck = now; LoadConfig(); WriteLog(); }
+
     if (g_enabled) AntiFlipTick();
     else { g_lastVeh = nullptr; g_stillTicks = 0; }
 }
- 
+
 // ---------------------------------------------------------------- entry AML
 extern "C" void OnModLoad()
 {
-    snprintf(g_iniPath, sizeof g_iniPath, "%s/configs/AntiKebalik.ini", aml->GetConfigPath());
+    const char* cp = aml->GetConfigPath();
+    snprintf(g_cfgPathAML, sizeof g_cfgPathAML, "%s", cp ? cp : "null");
+    snprintf(g_iniPath, sizeof g_iniPath, "%s/configs/AntiKebalik.ini", cp ? cp : "");
+    snprintf(g_logPath, sizeof g_logPath, "%s/configs/AntiKebalik.log", cp ? cp : "");
+    g_stage = 1;
     LoadConfig();
- 
+    WriteLog();                                   // log pertama: bukti mod termuat
+
     hGTASA = aml->GetLibHandle("libGTASA.so");
+    g_hGTASAdbg = hGTASA;
     FindPlayerVehicle = (void*(*)(int,bool))aml->GetSym(hGTASA, "_Z17FindPlayerVehicleib");
-     void* pProcess    = (void*)aml->GetSym(hGTASA, "_ZN5CGame7ProcessEv");
-   
- if (!FindPlayerVehicle || !pProcess) { __android_log_print(ANDROID_LOG_ERROR, "AntiKebalik", "simbol game tidak ditemukan"); return; }   aml->Hook(pProcess, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
+    void* pProcess    = (void*)aml->GetSym(hGTASA, "_ZN5CGame7ProcessEv");
+    g_symFindVeh = (void*)FindPlayerVehicle; g_symProcess = pProcess;
+
+    if (!FindPlayerVehicle || !pProcess)
+    {
+        __android_log_print(ANDROID_LOG_ERROR, "AntiKebalik", "simbol game tidak ditemukan");
+        WriteLog();
+        return;
+    }
+    g_stage = 2;
+    aml->Hook(pProcess, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
+    g_stage = 3;
     __android_log_print(ANDROID_LOG_INFO, "AntiKebalik", "siap (AntiFlip=%d)", g_enabled ? 1 : 0);
+    WriteLog();
 }
