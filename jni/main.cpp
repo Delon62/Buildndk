@@ -125,7 +125,7 @@ extern "C" void OnModLoad()
  
     hGTASA = aml->GetLibHandle("libGTASA.so");
     FindPlayerVehicle = (void*(*)(int,bool))aml->GetSym(hGTASA, "_Z17FindPlayerVehicleib");
-    void* pProcess    = aml->GetSym(hGTASA, "_ZN5CGame7ProcessEv");
+     void* pProcess    = (void*)aml->GetSym(hGTASA, "_ZN5CGame7ProcessEv");
  
     if (!FindPlayerVehicle || !pProcess) { logger->Error("AntiKebalik: simbol game tidak ditemukan"); return; }
     aml->Hook(pProcess, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
