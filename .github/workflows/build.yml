@@ -8,22 +8,22 @@ jobs:
 
       - name: Cari folder proyek
         run: |
-          MK=$(find . -path ./aml_src -prune -o -name Android.mk -print | head -n 1)
+          MK=$(find . -path ./aml_src -prune -o -path ./imgui_src -prune -o -name Android.mk -print | head -n 1)
           echo "Android.mk ditemukan: $MK"
           test -n "$MK" || { echo "Android.mk tidak ada di repo"; ls -R; exit 1; }
           echo "PROJ=$(dirname $(dirname $MK))" >> $GITHUB_ENV
 
-      - name: Cek isi folder
-        run: |
-          echo "PROJ=$PROJ"
-          ls -la "$PROJ" "$PROJ/jni"
-
       - name: Ambil header AML
         run: |
-          git clone --depth 1 https://github.com/RusJJ/AndroidModLoader aml_src
+          git clone --depth 1 --branch v1.4.0 https://github.com/RusJJ/AndroidModLoader aml_src || git clone --depth 1 https://github.com/RusJJ/AndroidModLoader aml_src
           mkdir -p "$PROJ/aml_headers"
           cp -r aml_src/mod "$PROJ/aml_headers/mod"
           ls "$PROJ/aml_headers/mod"
+
+      - name: Ambil ImGui
+        run: |
+          git clone --depth 1 --branch v1.89.7 https://github.com/ocornut/imgui "$PROJ/imgui_src"
+          ls "$PROJ/imgui_src/backends" | grep opengl3
 
       - name: Build
         run: |
